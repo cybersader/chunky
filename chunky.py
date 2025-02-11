@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 csv_lib.py – A minimal CSV transformation library using streaming/chunked processing.
 
@@ -7,8 +8,9 @@ Functions include:
   • generate_column_analytics() – Stream through a CSV to compute per‑column stats.
   • join_large_csvs() – Join two CSV files by reading the “left” file in chunks.
   • unique_filter() – Write only unique rows (based on specified columns) to an output CSV.
+  • concatenate_csv_folder() – Concatenate all CSV files in a folder into one CSV.
 
-Each function writes its output as a CSV file.
+Each function writes its output as a CSV file and displays progress bars.
 """
 
 import os
@@ -31,7 +33,6 @@ class CustomCSVTqdm(tqdm):
         rate = n / elapsed if elapsed else 0
         remaining_time = (total - n) / rate if rate and total is not None else 0
         formatted_rate = f"{rate:.2f}"
-        # Use humanize if available; otherwise, just use the formatted string.
         humanized_rate = humanize.intcomma(formatted_rate) if humanize else formatted_rate
         if total is not None:
             return (f"Counting rows: {n}/{total} rows "
@@ -157,22 +158,20 @@ def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_
     if output_csv is None:
         output_csv = os.path.join(os.path.dirname(input_csv), f"no_parentheses__{os.path.basename(input_csv)}")
     first_chunk = True
-    with pd.read_csv(input_csv, chunksize=chunksize, low_memory=False) as reader, \
-         open(output_csv, 'w', newline='', encoding='utf-8') as f_out:
-        for chunk in reader:
-            for col in columns:
-                if col in chunk.columns:
-                    new_col = col if edit_in_place else f"__{col}"
-                    # Ensure the column is processed as string.
-                    chunk[new_col] = chunk[col].astype(str).apply(lambda x: re.sub(r'\(.*?\)', '', x).rstrip())
-                    if not edit_in_place:
-                        chunk.drop(columns=[col], inplace=True)
-            # Write processed chunk (write header only once)
-            if first_chunk:
-                chunk.to_csv(f_out, index=False, header=True)
-                first_chunk = False
-            else:
-                chunk.to_csv(f_out, index=False, header=False)
+    reader = pd.read_csv(input_csv, chunksize=chunksize, low_memory=False)
+    for chunk in tqdm(reader, desc="Removing Parentheses", unit="chunk", ncols=100):
+        for col in columns:
+            if col in chunk.columns:
+                new_col = col if edit_in_place else f"__{col}"
+                # Process the column as string.
+                chunk[new_col] = chunk[col].astype(str).apply(lambda x: re.sub(r'\(.*?\)', '', x).rstrip())
+                if not edit_in_place:
+                    chunk.drop(columns=[col], inplace=True)
+        mode = 'w' if first_chunk else 'a'
+        header = first_chunk
+        with open(output_csv, mode, newline='', encoding='utf-8') as f_out:
+            chunk.to_csv(f_out, index=False, header=header)
+        first_chunk = False
     return output_csv
 
 # -------------------------
@@ -248,15 +247,14 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
     if output_csv is None:
         output_csv = os.path.join(os.path.dirname(left_file), f"joined__{os.path.basename(left_file)}")
     first_chunk = True
-    with pd.read_csv(left_file, chunksize=chunksize, low_memory=False) as reader, \
-         open(output_csv, 'w', newline='', encoding='utf-8') as f_out:
-        for chunk in tqdm(reader, desc="Joining CSVs", unit="chunk", ncols=100):
-            merged = pd.merge(chunk, right_df, left_on=left_on, right_on=right_on, how=join_type)
-            if first_chunk:
-                merged.to_csv(f_out, index=False, header=True)
-                first_chunk = False
-            else:
-                merged.to_csv(f_out, index=False, header=False)
+    reader = pd.read_csv(left_file, chunksize=chunksize, low_memory=False)
+    for chunk in tqdm(reader, desc="Joining CSVs", unit="chunk", ncols=100):
+        merged = pd.merge(chunk, right_df, left_on=left_on, right_on=right_on, how=join_type)
+        mode = 'w' if first_chunk else 'a'
+        header = first_chunk
+        with open(output_csv, mode, newline='', encoding='utf-8') as f_out:
+            merged.to_csv(f_out, index=False, header=header)
+        first_chunk = False
     return output_csv
 
 # -------------------------
@@ -284,35 +282,28 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     seen = set()
     first_chunk = True
-    import pandas as pd
-    from tqdm import tqdm
-
-    with pd.read_csv(input_csv, chunksize=chunksize, low_memory=False) as reader, \
-         open(output_csv, 'w', newline='', encoding='utf-8') as f_out:
-        for chunk in tqdm(reader, desc="Filtering unique rows", unit="chunk", ncols=100):
-            mask = []
-            for idx, row in chunk.iterrows():
-                # If unique_cols is empty, use all columns and hash the joined string.
-                if not unique_cols:
-                    # Convert each value to string and join using a delimiter.
-                    key_str = ','.join(str(v) for v in row.values)
-                    key = hash(key_str)
-                else:
-                    key = tuple(row[col] for col in unique_cols)
-                if key in seen:
-                    mask.append(False)
-                else:
-                    seen.add(key)
-                    mask.append(True)
-            filtered_chunk = chunk[mask]
-            if not filtered_chunk.empty:
-                if first_chunk:
-                    filtered_chunk.to_csv(f_out, index=False, header=True)
-                    first_chunk = False
-                else:
-                    filtered_chunk.to_csv(f_out, index=False, header=False)
+    reader = pd.read_csv(input_csv, chunksize=chunksize, low_memory=False)
+    for chunk in tqdm(reader, desc="Filtering unique rows", unit="chunk", ncols=100):
+        mask = []
+        for idx, row in chunk.iterrows():
+            if not unique_cols:
+                key_str = ','.join(str(v) for v in row.values)
+                key = hash(key_str)
+            else:
+                key = tuple(row[col] for col in unique_cols)
+            if key in seen:
+                mask.append(False)
+            else:
+                seen.add(key)
+                mask.append(True)
+        filtered_chunk = chunk[mask]
+        if not filtered_chunk.empty:
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as f_out:
+                filtered_chunk.to_csv(f_out, index=False, header=header)
+            first_chunk = False
     return output_csv
-
 
 # -------------------------
 # (Optional) Additional helper function: infer_dtypes
@@ -344,13 +335,13 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
     if not csv_files:
         raise ValueError("No CSV files found in folder: " + input_folder)
     first_file = True
-    with open(output_file, 'w', newline='', encoding='utf-8') as fout:
-        for file in csv_files:
-            print(f"Concatenating file: {file}")
-            for chunk in pd.read_csv(file, chunksize=chunksize, low_memory=False):
-                if first_file:
-                    chunk.to_csv(fout, index=False, header=True)
-                    first_file = False
-                else:
-                    chunk.to_csv(fout, index=False, header=False)
+    for file in tqdm(csv_files, desc="Concatenating CSV files", unit="file", ncols=100):
+        print(f"Processing file: {file}")
+        reader = pd.read_csv(file, chunksize=chunksize, low_memory=False)
+        for chunk in tqdm(reader, desc=f"Processing chunks of {os.path.basename(file)}", unit="chunk", ncols=100):
+            mode = 'w' if first_file else 'a'
+            header = first_file
+            with open(output_file, mode, newline='', encoding='utf-8') as fout:
+                chunk.to_csv(fout, index=False, header=header)
+            first_file = False
     return output_file
