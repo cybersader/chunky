@@ -353,19 +353,27 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
     Parameters:
       input_csv      : Path to the input CSV file.
       output_csv     : Path to the output CSV file.
-      transformations: A dictionary where keys are regex patterns to match header fields,
-                       and values are either replacement strings or callables that accept
-                       a match object and return the replacement string.
-                       For example:
-                           { r"^(policy)\s*\(.*\)$": r"\1" }
-                       If None, no transformation is applied.
-      delimiter      : The CSV field delimiter (default: comma).
+      transformations: A dictionary where each key is a regex pattern and its
+                       corresponding value is the replacement string or a callable.
+                       For example, to transform:
+     
+                         "policy (filter: ...)"
+     
+                       into:
+     
+                         "policy"
+     
+                       you might use:
+     
+                         { r'^"?\s*(policy)\s*(?:\(.*)?"?$': r'\1' }
+     
+      delimiter      : The CSV field delimiter (default is a comma).
       chunk_size     : Number of bytes to read per chunk when streaming the rest of the file.
 
     Returns:
       The output CSV filename.
     """
-    # Get total file size (for progress tracking)
+    # Get the total file size (for progress tracking)
     total_size = os.path.getsize(input_csv)
     
     with open(input_csv, 'r', encoding='utf-8') as fin, \
@@ -373,29 +381,27 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
         
         # Read the header line.
         header_line = fin.readline().rstrip("\r\n")
-        # Split into fields using the delimiter.
+        # Split into fields using the provided delimiter.
         headers = header_line.split(delimiter)
         
         new_headers = []
         for h in headers:
-            # Strip leading/trailing whitespace and remove surrounding quotes.
-            h_clean = h.strip().strip('"')
+            h_clean = h  # start with the original header field (which might include quotes)
             if transformations:
                 for pattern, replacement in transformations.items():
-                    # Use re.sub regardless; if no match, h_clean stays the same.
+                    # Apply the transformation if the field matches the pattern.
                     new_val = re.sub(pattern, replacement, h_clean)
                     if new_val != h_clean:
-                        # Transformation applied. Use the transformed value.
                         h_clean = new_val
-                        # If only one transformation is desired per header, break here.
+                        # If you want only one transformation per field, break here.
                         break
             new_headers.append(h_clean)
         
-        # Join the new header fields with the delimiter and write to output.
+        # Write the modified header to the output file.
         new_header_line = delimiter.join(new_headers) + "\n"
         fout.write(new_header_line)
         
-        # Determine position after header (for progress bar).
+        # Get the current file position (after the header) for progress reporting.
         pos = fin.tell()
         remaining_bytes = total_size - pos
         
@@ -406,6 +412,9 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
                 if not chunk:
                     break
                 fout.write(chunk)
+                pbar.update(len(chunk))
+                
+    return output_csv
                 pbar.update(len(chunk))
                 
     return output_csv
