@@ -267,24 +267,38 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     Filter the input CSV so that only unique rows (based on the specified columns)
     are written to the output CSV. Uses a streaming approach.
-    
+
+    If `unique_cols` is empty (or evaluates to False), the uniqueness is based on
+    all columns in the row. In that case, a hash of all row values (joined by commas)
+    is used as the uniqueness key to save memory.
+
     Parameters:
       input_csv  : Path to the input CSV.
-      unique_cols: List of column names that define uniqueness.
+      unique_cols: List of column names that define uniqueness. If empty, uniqueness
+                   is computed on all columns.
       output_csv : Path to the output CSV.
       chunksize  : Number of rows to process per chunk.
-    
+
     Returns:
       The output CSV filename.
     """
     seen = set()
     first_chunk = True
+    import pandas as pd
+    from tqdm import tqdm
+
     with pd.read_csv(input_csv, chunksize=chunksize, low_memory=False) as reader, \
          open(output_csv, 'w', newline='', encoding='utf-8') as f_out:
         for chunk in tqdm(reader, desc="Filtering unique rows", unit="chunk", ncols=100):
             mask = []
             for idx, row in chunk.iterrows():
-                key = tuple(row[col] for col in unique_cols)
+                # If unique_cols is empty, use all columns and hash the joined string.
+                if not unique_cols:
+                    # Convert each value to string and join using a delimiter.
+                    key_str = ','.join(str(v) for v in row.values)
+                    key = hash(key_str)
+                else:
+                    key = tuple(row[col] for col in unique_cols)
                 if key in seen:
                     mask.append(False)
                 else:
@@ -298,6 +312,7 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
                 else:
                     filtered_chunk.to_csv(f_out, index=False, header=False)
     return output_csv
+
 
 # -------------------------
 # (Optional) Additional helper function: infer_dtypes
