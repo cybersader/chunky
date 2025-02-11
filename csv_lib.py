@@ -16,6 +16,7 @@ import re
 import csv
 import tempfile
 import shutil
+import glob
 import pandas as pd
 from tqdm import tqdm
 import humanize  # Optional: used to “humanize” rates in progress bars
@@ -310,4 +311,31 @@ def infer_dtypes(file_path, nrows=1000):
     dtypes = df_sample.dtypes.to_dict()
     return {col: str(dtype) for col, dtype in dtypes.items()}
 
-# End of csv_lib.py
+def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
+    """
+    Concatenates all CSV files in a folder into a single CSV file.
+    
+    Assumes all CSVs share the same header.
+    
+    Parameters:
+      input_folder: Path to the folder containing CSV files.
+      output_file : Path where the combined CSV will be saved.
+      chunksize   : Number of rows per chunk to read.
+      
+    Returns:
+      The output_file name.
+    """
+    csv_files = glob.glob(os.path.join(input_folder, '*.csv'))
+    if not csv_files:
+        raise ValueError("No CSV files found in folder: " + input_folder)
+    first_file = True
+    with open(output_file, 'w', newline='', encoding='utf-8') as fout:
+        for file in csv_files:
+            print(f"Concatenating file: {file}")
+            for chunk in pd.read_csv(file, chunksize=chunksize, low_memory=False):
+                if first_file:
+                    chunk.to_csv(fout, index=False, header=True)
+                    first_file = False
+                else:
+                    chunk.to_csv(fout, index=False, header=False)
+    return output_file
