@@ -288,8 +288,6 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
     total_rows_left = count_rows_in_chunks(left_file, chunksize)
     total_rows_right = count_rows_in_chunks(right_file, chunksize)
     total_comparisons = total_rows_left * total_rows_right
-    input_csv_basename = os.path.basename(left_file)
-    filename_without_ext = os.path.splitext(input_csv_basename)[0]
     # Optionally, you can infer dtypes (not used in this snippet)
     # left_dtypes = infer_dtypes(left_file)
     # right_dtypes = infer_dtypes(right_file)
