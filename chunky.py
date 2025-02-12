@@ -430,6 +430,10 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
 # 8. Rename CSV Header (Row-Based Progress)
 # -------------------------
 
+# -------------------------
+# 8. Rename CSV Header (Row-Based Streaming)
+# -------------------------
+
 def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=",", chunksize=10000):
     """
     Rename header fields in a CSV file according to provided regex transformations.
@@ -445,9 +449,10 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
     Returns:
       The output CSV filename.
     """
-    # Read header using pandas to guarantee proper CSV parsing.
-    df_header = pd.read_csv(input_csv, nrows=0)
-    headers = list(df_header.columns)
+    # Read the header using the csv module for minimal memory usage.
+    with open(input_csv, 'r', encoding='utf-8') as fin:
+        reader = csv.reader(fin, delimiter=delimiter)
+        headers = next(reader)
     
     new_headers = []
     for h in headers:
@@ -460,23 +465,18 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
                     break
         new_headers.append(h_clean)
     
-    # Open output file and write new header.
+    # Write new header.
     with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
         writer = csv.writer(fout, delimiter=delimiter)
         writer.writerow(new_headers)
     
-    # Count remaining rows (excluding header).
-    total = count_rows(input_csv, chunksize)
-    
-    # Now stream the rest of the CSV (skip the header) using read_csv_in_chunks.
-    first_chunk = True
-    with tqdm(total=total, desc="Renaming headers & copying CSV", unit="row", ncols=100) as pbar:
+    # Compute total rows minus one (since header is already processed).
+    total = count_rows(input_csv, chunksize) - 1
+    with tqdm(total=total, desc="Renaming header & copying rows", unit="row", ncols=100) as pbar:
+        # Stream the rest of the CSV, skipping the header line.
         for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False, skiprows=1):
-            # Write the chunk (using to_csv with header=False)
-            mode = 'a' if not first_chunk else 'w'
-            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+            with open(output_csv, 'a', newline='', encoding='utf-8') as fout:
                 chunk.to_csv(fout, index=False, header=False)
-            first_chunk = False
             pbar.update(chunk.shape[0])
     return output_csv
 
