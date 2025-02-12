@@ -6,8 +6,9 @@ This package includes functions to:
   • Count rows and stream CSVs in chunks.
   • Build a pivot table from a large CSV (with aggregations such as count, sum, nunique, and concatenation).
   • Filter CSV rows using a stateless filter function.
-  • Join two CSV files using streaming.
-  • Other utilities: unique_filter, process_csv_remove_parentheses, generate_column_analytics, and concatenate_csv_folder.
+  • Join two CSV files using streaming with a custom progress bar for comparisons.
+  • Other utilities: unique_filter, process_csv_remove_parentheses, generate_column_analytics, 
+    concatenate_csv_folder, and rename_csv_header.
 
 All functions output a CSV file and use progress bars that update based on row counts.
 """
@@ -44,6 +45,22 @@ def count_rows_in_chunks(file_path, chunksize=10000):
     return count_rows(file_path, chunksize)
 
 # -------------------------
+# Custom Comparison Progress Bar for Joins
+# -------------------------
+
+class CustomComparisonTqdm(tqdm):
+    @staticmethod
+    def format_meter(n, total, elapsed, rate_fmt=None, postfix=None, ncols=None, **extra_kwargs):
+        percentage = (n / total * 100) if total else 0
+        formatted_percentage = f"{percentage:.1f}"
+        if total is not None:
+            return f"Processing comparisons: {humanize.intcomma(n)}/{humanize.intcomma(total)} comparisons " \
+                   f"({formatted_percentage}%) [{tqdm.format_interval(elapsed)}]"
+        else:
+            return f"Processing comparisons: {humanize.intcomma(n)} comparisons " \
+                   f"[{tqdm.format_interval(elapsed)}]"
+
+# -------------------------
 # 1. Streaming Pivot Table with Advanced Aggregation
 # -------------------------
 
@@ -72,7 +89,7 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
     """
     total_rows = count_rows_in_chunks(input_csv, chunksize)
     
-    # Normalize aggfuncs to a dictionary
+    # Normalize aggfuncs to a dictionary.
     if not isinstance(aggfuncs, dict):
         aggfuncs = {col: aggfuncs for col in value_cols}
     
@@ -84,7 +101,6 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             for _, row in chunk.iterrows():
                 key_index = tuple(row[col] for col in index_cols)
-                # If pivot_cols is empty, use an empty tuple.
                 key_pivot = tuple(row[col] for col in pivot_cols) if pivot_cols else tuple()
                 key = (key_index, key_pivot)
                 if key not in agg_dict:
@@ -117,7 +133,6 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
                         agg_dict[key][col].append(str(value))
             pbar.update(chunk.shape[0])
     
-    # Determine unique index and pivot keys.
     unique_index = set()
     unique_pivot = set()
     for (idx_key, p_key) in agg_dict.keys():
@@ -126,7 +141,6 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
     unique_index = list(unique_index)
     unique_pivot = list(unique_pivot)
     
-    # Build header.
     header = list(index_cols)
     pivot_col_names = []
     for p in unique_pivot:
@@ -135,7 +149,6 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
             pivot_col_names.append(f"{col}_{pivot_str}")
     header.extend(pivot_col_names)
     
-    # Build result rows.
     result_rows = []
     for idx_key in unique_index:
         row_values = list(idx_key)
@@ -192,10 +205,9 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     with tqdm(total=total, desc="Filtering CSV", unit="row", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             mask = filter_func(chunk)
-            # Ensure that mask is a Boolean Series with the same index as chunk.
             if not isinstance(mask, pd.Series) or mask.dtype != bool or len(mask) != len(chunk):
                 raise ValueError("filter_func must return a Boolean Series of the same length as the chunk.")
-            filtered = chunk.loc[mask]  # Use .loc to avoid KeyError
+            filtered = chunk.loc[mask]
             mode = 'w' if first_chunk else 'a'
             header = first_chunk
             with open(output_csv, mode, newline='', encoding='utf-8') as fout:
@@ -205,7 +217,7 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     return output_csv
 
 # -------------------------
-# Other utility functions
+# 3. Unique Filter (streamed)
 # -------------------------
 
 def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
@@ -241,7 +253,7 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
             else:
                 seen.add(key)
                 mask.append(True)
-        filtered_chunk = chunk.loc[mask]  # Use .loc to avoid KeyError
+        filtered_chunk = chunk.loc[mask]
         mode = 'w' if first_chunk else 'a'
         header = first_chunk
         with open(output_csv, mode, newline='', encoding='utf-8') as fout:
@@ -249,12 +261,16 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
         first_chunk = False
     return output_csv
 
-def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv=None):
-    """
-    Join two CSV files using a streaming approach.
+# -------------------------
+# 4. Join Large CSVs using a Custom Comparison Progress Bar
+# -------------------------
 
-    Reads the left_file in chunks and merges each chunk with the fully loaded right_file.
-    (Assumes right_file is small enough to load entirely.)
+def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, suffixes=('_x', '_y')):
+    """
+    Join two CSV files using a streaming approach with a custom progress bar for comparisons.
+
+    Reads the left_file in chunks and, for each left chunk, iterates through chunks of the right_file.
+    Total comparisons are estimated as total_rows_left * total_rows_right.
 
     Parameters:
       left_file  : Path to the main (large) CSV file.
@@ -263,26 +279,45 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
       right_on   : Column name(s) on the right file to join on.
       join_type  : Type of join (e.g., 'left', 'inner').
       chunksize  : Number of rows per chunk.
-      output_csv : (Optional) Output CSV filename.
+      suffixes  : Suffixes to append to overlapping columns.
 
     Returns:
       The output CSV filename.
     """
-    right_df = pd.read_csv(right_file)
-    if output_csv is None:
-        output_csv = os.path.join(os.path.dirname(left_file), f"joined__{os.path.basename(left_file)}")
-    first_chunk = True
-    total = count_rows(left_file, chunksize)
-    with tqdm(total=total, desc="Joining CSVs", unit="row", ncols=100) as pbar:
-        for chunk in pd.read_csv(left_file, chunksize=chunksize, low_memory=False):
-            merged = pd.merge(chunk, right_df, left_on=left_on, right_on=right_on, how=join_type)
-            mode = 'w' if first_chunk else 'a'
-            header = first_chunk
-            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
-                merged.to_csv(fout, index=False, header=header)
-            first_chunk = False
-            pbar.update(chunk.shape[0])
+    suffixes = tuple(suffixes)
+    total_rows_left = count_rows_in_chunks(left_file, chunksize)
+    total_rows_right = count_rows_in_chunks(right_file, chunksize)
+    total_comparisons = total_rows_left * total_rows_right
+    input_csv_basename = os.path.basename(left_file)
+    filename_without_ext = os.path.splitext(input_csv_basename)[0]
+    output_csv = os.path.join(os.path.dirname(left_file), f"joined__{filename_without_ext}.csv")
+    # Optionally, you can infer dtypes (not used in this snippet)
+    # left_dtypes = infer_dtypes(left_file)
+    # right_dtypes = infer_dtypes(right_file)
+    with open(output_csv, 'w', newline='', encoding='utf-8-sig') as f_output:
+        writer = None
+        with CustomComparisonTqdm(total=total_comparisons, desc='Processing comparisons', unit='comparison', ncols=100) as pbar:
+            for left_chunk in read_csv_in_chunks(left_file, chunksize):
+                for right_chunk in read_csv_in_chunks(right_file, chunksize):
+                    # If suffixes are empty, drop overlapping columns (except the join key)
+                    if suffixes == ('', ''):
+                        overlapping = set(left_chunk.columns) & set(right_chunk.columns)
+                        if right_on in overlapping:
+                            overlapping.remove(right_on)
+                        right_chunk = right_chunk.drop(columns=overlapping, errors='ignore')
+                    df_chunk = pd.merge(left_chunk, right_chunk, how=join_type, left_on=left_on, right_on=right_on, suffixes=suffixes)
+                    if writer is None:
+                        df_chunk.to_csv(f_output, index=False)
+                        writer = True
+                    else:
+                        df_chunk.to_csv(f_output, header=False, mode='a', index=False)
+                    # Update the progress bar: we assume each left row is compared with chunksize right rows.
+                    pbar.update(chunksize * left_chunk.shape[0])
     return output_csv
+
+# -------------------------
+# 5. Process CSV: Remove Parentheses
+# -------------------------
 
 def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_place=True, output_csv=None):
     """
@@ -291,7 +326,7 @@ def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_
     Parameters:
       input_csv    : Path to the input CSV.
       columns      : List of column names to process.
-      chunksize    : Number of rows per chunk.
+      chunksize    : Number of rows to process per chunk.
       edit_in_place: If True, overwrite original column; otherwise create a new column.
       output_csv   : (Optional) Output CSV filename.
 
@@ -316,29 +351,36 @@ def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_
         first_chunk = False
     return output_csv
 
+# -------------------------
+# 6. Generate Column Analytics
+# -------------------------
+
 def generate_column_analytics(input_csv, output_csv=None, chunksize=10000):
     """
     Compute basic analytics (total rows, non-null count, unique count, etc.) for each column
-    by processing the CSV in chunks.
-
+    by processing the CSV in chunks. The progress bar is updated based on the number of rows
+    processed (i.e. chunksize per full chunk).
+    
     Parameters:
       input_csv  : Path to the input CSV.
       output_csv : (Optional) Output CSV filename.
       chunksize  : Number of rows per chunk.
-
+    
     Returns:
       The output CSV filename.
     """
     total = count_rows(input_csv, chunksize)
     aggregated = {}
-    for chunk in tqdm(read_csv_in_chunks(input_csv, chunksize), desc="Analyzing columns", unit="row", ncols=100):
-        for col in chunk.columns:
-            if col not in aggregated:
-                aggregated[col] = {'total': 0, 'non_null': 0, 'null': 0, 'unique': set()}
-            aggregated[col]['total'] += len(chunk)
-            aggregated[col]['non_null'] += chunk[col].count()
-            aggregated[col]['null'] += chunk[col].isnull().sum()
-            aggregated[col]['unique'].update(chunk[col].dropna().unique())
+    with tqdm(total=total, desc="Analyzing columns", unit="row", ncols=100) as pbar:
+        for chunk in read_csv_in_chunks(input_csv, chunksize):
+            for col in chunk.columns:
+                if col not in aggregated:
+                    aggregated[col] = {'total': 0, 'non_null': 0, 'null': 0, 'unique': set()}
+                aggregated[col]['total'] += len(chunk)
+                aggregated[col]['non_null'] += chunk[col].count()
+                aggregated[col]['null'] += chunk[col].isnull().sum()
+                aggregated[col]['unique'].update(chunk[col].dropna().unique())
+            pbar.update(len(chunk))
     output_data = []
     for col, stats in aggregated.items():
         output_data.append({
@@ -354,17 +396,21 @@ def generate_column_analytics(input_csv, output_csv=None, chunksize=10000):
     df_out.to_csv(output_csv, index=False, quoting=csv.QUOTE_ALL, escapechar='"')
     return output_csv
 
+# -------------------------
+# 7. Concatenate CSV Folder
+# -------------------------
+
 def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
     """
     Concatenate all CSV files in a folder into one CSV file.
     
     Assumes all CSVs share the same header.
-
+    
     Parameters:
       input_folder: Path to the folder containing CSV files.
       output_file : Path to save the combined CSV.
       chunksize   : Number of rows per chunk.
-
+    
     Returns:
       The output_file name.
     """
@@ -383,17 +429,21 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
             first_file = False
     return output_file
 
+# -------------------------
+# 8. Rename CSV Header
+# -------------------------
+
 def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=",", chunk_size=8192):
     """
     Rename header fields in a CSV file according to provided regex transformations.
-
+    
     Parameters:
       input_csv      : Path to the input CSV.
       output_csv     : Path to the output CSV.
       transformations: Dictionary mapping regex patterns to replacement strings or callables.
       delimiter      : Field delimiter (default is comma).
       chunk_size     : Bytes per chunk when streaming the remainder of the file.
-
+    
     Returns:
       The output CSV filename.
     """
