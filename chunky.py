@@ -6,10 +6,10 @@ This package includes functions to:
   • Count rows and stream CSVs in chunks.
   • Build a pivot table from a large CSV (with aggregations such as count, sum, nunique, and concatenation).
   • Filter CSV rows using a stateless filter function.
-  • (Other utility functions: join_large_csvs, unique_filter, process_csv_remove_parentheses, 
-    generate_column_analytics, and concatenate_csv_folder.)
+  • Join two CSV files using streaming.
+  • Other utilities: unique_filter, process_csv_remove_parentheses, generate_column_analytics, and concatenate_csv_folder.
 
-All functions output a CSV file and use progress bars that update using the actual row counts.
+All functions output a CSV file and use progress bars that update based on row counts.
 """
 
 import os
@@ -23,30 +23,11 @@ from tqdm import tqdm
 import humanize  # used for pretty progress bar rates
 
 # -------------------------
-# Custom progress bar classes
-# -------------------------
-
-class CustomCSVTqdm(tqdm):
-    @staticmethod
-    def format_meter(n, total, elapsed, rate_fmt=None, postfix=None, ncols=None, **extra_kwargs):
-        rate = n / elapsed if elapsed else 0
-        remaining_time = (total - n) / rate if rate and total is not None else 0
-        formatted_rate = f"{rate:.2f}"
-        humanized_rate = humanize.intcomma(formatted_rate) if humanize else formatted_rate
-        if total is not None:
-            return (f"Counting rows: {n}/{total} rows "
-                    f"[{tqdm.format_interval(elapsed)}<{tqdm.format_interval(remaining_time)}, "
-                    f"{humanized_rate} row/s]")
-        else:
-            return (f"Counting rows: {n} rows "
-                    f"[{tqdm.format_interval(elapsed)}, {humanized_rate} row/s]")
-
-# -------------------------
-# Helper functions for chunking
+# Helper functions for chunking and row counting
 # -------------------------
 
 def count_rows(file_path, chunksize=10000):
-    """Count the total number of rows in a CSV by reading it in chunks."""
+    """Count the total number of rows in a CSV by processing it in chunks."""
     total = 0
     for chunk in pd.read_csv(file_path, chunksize=chunksize, low_memory=False):
         total += chunk.shape[0]
@@ -59,15 +40,11 @@ def read_csv_in_chunks(file_path, chunksize=10000):
         yield chunk
 
 def count_rows_in_chunks(file_path, chunksize=10000):
-    """Count rows using a progress bar that updates by row count."""
-    total = count_rows(file_path, chunksize)
-    current = 0
-    for chunk in read_csv_in_chunks(file_path, chunksize):
-        current += chunk.shape[0]
-    return current
+    """Count rows using a streaming approach (returns a total row count)."""
+    return count_rows(file_path, chunksize)
 
 # -------------------------
-# 1. Streaming pivot table
+# 1. Streaming Pivot Table with Advanced Aggregation
 # -------------------------
 
 def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chunksize=10000,
@@ -78,7 +55,7 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
     Parameters:
       input_csv : Path to the input CSV.
       index_cols: List of column names to use as the pivot table's index.
-      pivot_cols: List of column names to pivot on.
+      pivot_cols: List of column names to pivot on. (If empty, no extra pivoting occurs.)
       value_cols: List of column names whose values are to be aggregated.
       aggfuncs  : Either a single string (applied to all value columns) or a dictionary mapping each value column
                  to an aggregation function. Supported functions are:
@@ -100,15 +77,15 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
         aggfuncs = {col: aggfuncs for col in value_cols}
     
     # Initialize aggregation dictionary.
-    # Key: (tuple of index values, tuple of pivot values)
-    # Value: dictionary mapping each value column to its aggregated value.
+    # Key: (tuple(index values), tuple(pivot values)) → dict for each value column.
     agg_dict = {}
     
     with tqdm(total=total_rows, desc="Pivoting rows", unit="row", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             for _, row in chunk.iterrows():
                 key_index = tuple(row[col] for col in index_cols)
-                key_pivot = tuple(row[col] for col in pivot_cols)
+                # If pivot_cols is empty, use an empty tuple.
+                key_pivot = tuple(row[col] for col in pivot_cols) if pivot_cols else tuple()
                 key = (key_index, key_pivot)
                 if key not in agg_dict:
                     agg_dict[key] = {}
@@ -149,11 +126,11 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
     unique_index = list(unique_index)
     unique_pivot = list(unique_pivot)
     
-    # Build header: index columns + one column per (pivot, value_col) combination.
+    # Build header.
     header = list(index_cols)
     pivot_col_names = []
     for p in unique_pivot:
-        pivot_str = "_".join(map(str, p))
+        pivot_str = "_".join(map(str, p)) if p else ""
         for col in value_cols:
             pivot_col_names.append(f"{col}_{pivot_str}")
     header.extend(pivot_col_names)
@@ -178,10 +155,7 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
             else:
                 for col in value_cols:
                     func = aggfuncs[col]
-                    if func in ['count', 'sum', 'nunique']:
-                        row_values.append(0)
-                    elif func == 'concat':
-                        row_values.append("")
+                    row_values.append(0 if func in ['count', 'sum', 'nunique'] else "")
         result_rows.append(row_values)
     
     if output_csv is None:
@@ -206,8 +180,8 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     Parameters:
       input_csv : Path to the input CSV.
       output_csv: Path to the output CSV.
-      filter_func: A function that takes a DataFrame chunk and returns a boolean Series (of the same length)
-                   indicating which rows to keep.
+      filter_func: A function that takes a DataFrame chunk and returns a Boolean Series
+                   (of the same length) indicating which rows to keep.
       chunksize : Number of rows to process per chunk.
 
     Returns:
@@ -218,7 +192,10 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     with tqdm(total=total, desc="Filtering CSV", unit="row", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             mask = filter_func(chunk)
-            filtered = chunk[mask]
+            # Ensure that mask is a Boolean Series with the same index as chunk.
+            if not isinstance(mask, pd.Series) or mask.dtype != bool or len(mask) != len(chunk):
+                raise ValueError("filter_func must return a Boolean Series of the same length as the chunk.")
+            filtered = chunk.loc[mask]  # Use .loc to avoid KeyError
             mode = 'w' if first_chunk else 'a'
             header = first_chunk
             with open(output_csv, mode, newline='', encoding='utf-8') as fout:
@@ -264,7 +241,7 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
             else:
                 seen.add(key)
                 mask.append(True)
-        filtered_chunk = chunk[mask]
+        filtered_chunk = chunk.loc[mask]  # Use .loc to avoid KeyError
         mode = 'w' if first_chunk else 'a'
         header = first_chunk
         with open(output_csv, mode, newline='', encoding='utf-8') as fout:
@@ -295,14 +272,16 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
     if output_csv is None:
         output_csv = os.path.join(os.path.dirname(left_file), f"joined__{os.path.basename(left_file)}")
     first_chunk = True
-    for chunk in tqdm(pd.read_csv(left_file, chunksize=chunksize, low_memory=False),
-                      desc="Joining CSVs", unit="row", ncols=100):
-        merged = pd.merge(chunk, right_df, left_on=left_on, right_on=right_on, how=join_type)
-        mode = 'w' if first_chunk else 'a'
-        header = first_chunk
-        with open(output_csv, mode, newline='', encoding='utf-8') as fout:
-            merged.to_csv(fout, index=False, header=header)
-        first_chunk = False
+    total = count_rows(left_file, chunksize)
+    with tqdm(total=total, desc="Joining CSVs", unit="row", ncols=100) as pbar:
+        for chunk in pd.read_csv(left_file, chunksize=chunksize, low_memory=False):
+            merged = pd.merge(chunk, right_df, left_on=left_on, right_on=right_on, how=join_type)
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                merged.to_csv(fout, index=False, header=header)
+            first_chunk = False
+            pbar.update(chunk.shape[0])
     return output_csv
 
 def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_place=True, output_csv=None):
@@ -449,10 +428,6 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
                 fout.write(chunk)
                 pbar.update(len(chunk))
     return output_csv
-  
-# -------------------------
-# (Optional) Additional helper function: infer_dtypes
-# -------------------------
 
 def infer_dtypes(file_path, nrows=1000):
     """
