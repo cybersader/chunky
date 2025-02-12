@@ -265,7 +265,7 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
 # 4. Join Large CSVs using a Custom Comparison Progress Bar
 # -------------------------
 
-def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, suffixes=('_x', '_y')):
+def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv='joined.csv', suffixes=('_x', '_y')):
     """
     Join two CSV files using a streaming approach with a custom progress bar for comparisons.
 
@@ -290,7 +290,6 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
     total_comparisons = total_rows_left * total_rows_right
     input_csv_basename = os.path.basename(left_file)
     filename_without_ext = os.path.splitext(input_csv_basename)[0]
-    output_csv = os.path.join(os.path.dirname(left_file), f"joined__{filename_without_ext}.csv")
     # Optionally, you can infer dtypes (not used in this snippet)
     # left_dtypes = infer_dtypes(left_file)
     # right_dtypes = infer_dtypes(right_file)
