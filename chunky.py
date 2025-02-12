@@ -202,7 +202,7 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     """
     first_chunk = True
     total = count_rows(input_csv, chunksize)
-    with tqdm(total=total, desc="Filtering CSV", unit="rows", ncols=100) as pbar:
+    with tqdm(total=total, desc="Filtering CSV", unit="row", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             mask = filter_func(chunk)
             if not isinstance(mask, pd.Series) or mask.dtype != bool or len(mask) != len(chunk):
@@ -213,7 +213,7 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
             with open(output_csv, mode, newline='', encoding='utf-8') as fout:
                 filtered.to_csv(fout, index=False, header=header)
             first_chunk = False
-            pbar.update(chunk.shape[0] * chunks)
+            pbar.update(chunk.shape[0])
     return output_csv
 
 # -------------------------
@@ -239,33 +239,35 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     seen = set()
     first_chunk = True
-    for chunk in tqdm(pd.read_csv(input_csv, chunksize=chunksize, low_memory=False),
-                      desc="Filtering unique rows", unit="row", ncols=100):
-        mask = []
-        for idx, row in chunk.iterrows():
-            if not unique_cols:
-                key_str = ','.join(str(v) for v in row.values)
-                key = hash(key_str)
-            else:
-                key = tuple(row[col] for col in unique_cols)
-            if key in seen:
-                mask.append(False)
-            else:
-                seen.add(key)
-                mask.append(True)
-        filtered_chunk = chunk.loc[mask]
-        mode = 'w' if first_chunk else 'a'
-        header = first_chunk
-        with open(output_csv, mode, newline='', encoding='utf-8') as fout:
-            filtered_chunk.to_csv(fout, index=False, header=header)
-        first_chunk = False
+    total = count_rows(input_csv, chunksize)
+    with tqdm(total=total, desc="Filtering unique rows", unit="row", ncols=100) as pbar:
+        for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False):
+            mask = []
+            for idx, row in chunk.iterrows():
+                if not unique_cols:
+                    key_str = ','.join(str(v) for v in row.values)
+                    key = hash(key_str)
+                else:
+                    key = tuple(row[col] for col in unique_cols)
+                if key in seen:
+                    mask.append(False)
+                else:
+                    seen.add(key)
+                    mask.append(True)
+            filtered_chunk = chunk.loc[mask]
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                filtered_chunk.to_csv(fout, index=False, header=header)
+            first_chunk = False
+            pbar.update(chunk.shape[0])
     return output_csv
 
 # -------------------------
 # 4. Join Large CSVs using a Custom Comparison Progress Bar
 # -------------------------
 
-def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv='joined.csv', suffixes=('_x', '_y')):
+def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv=None, suffixes=('_x', '_y')):
     """
     Join two CSV files using a streaming approach with a custom progress bar for comparisons.
 
@@ -279,7 +281,8 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
       right_on   : Column name(s) on the right file to join on.
       join_type  : Type of join (e.g., 'left', 'inner').
       chunksize  : Number of rows per chunk.
-      suffixes  : Suffixes to append to overlapping columns.
+      output_csv : (Optional) Output CSV filename.
+      suffixes   : Suffixes to append to overlapping columns.
 
     Returns:
       The output CSV filename.
@@ -288,9 +291,10 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
     total_rows_left = count_rows_in_chunks(left_file, chunksize)
     total_rows_right = count_rows_in_chunks(right_file, chunksize)
     total_comparisons = total_rows_left * total_rows_right
-    # Optionally, you can infer dtypes (not used in this snippet)
-    # left_dtypes = infer_dtypes(left_file)
-    # right_dtypes = infer_dtypes(right_file)
+    if output_csv is None:
+        input_csv_basename = os.path.basename(left_file)
+        filename_without_ext = os.path.splitext(input_csv_basename)[0]
+        output_csv = os.path.join(os.path.dirname(left_file), f"joined__{filename_without_ext}.csv")
     with open(output_csv, 'w', newline='', encoding='utf-8-sig') as f_output:
         writer = None
         with CustomComparisonTqdm(total=total_comparisons, desc='Processing comparisons', unit='comparison', ncols=100) as pbar:
@@ -308,8 +312,8 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
                         writer = True
                     else:
                         df_chunk.to_csv(f_output, header=False, mode='a', index=False)
-                    # Update the progress bar: we assume each left row is compared with chunksize right rows.
-                    pbar.update(chunksize * left_chunk.shape[0])
+                    # Update progress: assume each left row is compared with all rows in the current right chunk.
+                    pbar.update(left_chunk.shape[0] * right_chunk.shape[0])
     return output_csv
 
 # -------------------------
@@ -333,8 +337,7 @@ def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_
     if output_csv is None:
         output_csv = os.path.join(os.path.dirname(input_csv), f"no_parentheses__{os.path.basename(input_csv)}")
     first_chunk = True
-    for chunk in tqdm(pd.read_csv(input_csv, chunksize=chunksize, low_memory=False),
-                      desc="Removing Parentheses", unit="row", ncols=100):
+    for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False):
         for col in columns:
             if col in chunk.columns:
                 new_col = col if edit_in_place else f"__{col}"
@@ -355,8 +358,7 @@ def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_
 def generate_column_analytics(input_csv, output_csv=None, chunksize=10000):
     """
     Compute basic analytics (total rows, non-null count, unique count, etc.) for each column
-    by processing the CSV in chunks. The progress bar is updated based on the number of rows
-    processed (i.e. chunksize per full chunk).
+    by processing the CSV in chunks. The progress bar is updated based on the number of rows processed.
     
     Parameters:
       input_csv  : Path to the input CSV.
@@ -415,10 +417,9 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
     if not csv_files:
         raise ValueError("No CSV files found in folder: " + input_folder)
     first_file = True
-    for file in tqdm(csv_files, desc="Concatenating CSV files", unit="file", ncols=100):
+    for file in glob.glob(os.path.join(input_folder, '*.csv')):
         print(f"Processing file: {file}")
-        for chunk in tqdm(pd.read_csv(file, chunksize=chunksize, low_memory=False),
-                          desc=f"Processing chunks of {os.path.basename(file)}", unit="row", ncols=100):
+        for chunk in pd.read_csv(file, chunksize=chunksize, low_memory=False):
             mode = 'w' if first_file else 'a'
             header = first_file
             with open(output_file, mode, newline='', encoding='utf-8') as fout:
@@ -427,53 +428,57 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
     return output_file
 
 # -------------------------
-# 8. Rename CSV Header
+# 8. Rename CSV Header (Row-Based Progress)
 # -------------------------
 
-def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=",", chunk_size=8192):
+def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=",", chunksize=10000):
     """
     Rename header fields in a CSV file according to provided regex transformations.
-    
+    This version uses a row-based streaming approach so that the progress bar is updated by row count.
+
     Parameters:
       input_csv      : Path to the input CSV.
       output_csv     : Path to the output CSV.
       transformations: Dictionary mapping regex patterns to replacement strings or callables.
       delimiter      : Field delimiter (default is comma).
-      chunk_size     : Bytes per chunk when streaming the remainder of the file.
-    
+      chunksize      : Number of rows per chunk (for streaming the file body).
+
     Returns:
       The output CSV filename.
     """
-    total_size = os.path.getsize(input_csv)
-    with open(input_csv, 'r', encoding='utf-8') as fin, \
-         open(output_csv, 'w', encoding='utf-8', newline='') as fout:
-        
-        header_line = fin.readline().rstrip("\r\n")
-        headers = header_line.split(delimiter)
-        
-        new_headers = []
-        for h in headers:
-            h_clean = h
-            if transformations:
-                for pattern, replacement in transformations.items():
-                    new_val = re.sub(pattern, replacement, h_clean)
-                    if new_val != h_clean:
-                        h_clean = new_val
-                        break
-            new_headers.append(h_clean)
-        
-        new_header_line = delimiter.join(new_headers) + "\n"
-        fout.write(new_header_line)
-        
-        pos = fin.tell()
-        remaining_bytes = total_size - pos
-        with tqdm(total=remaining_bytes, desc="Copying CSV data", unit="byte", ncols=100) as pbar:
-            while True:
-                chunk = fin.read(chunk_size)
-                if not chunk:
+    # Read header using pandas to guarantee proper CSV parsing.
+    df_header = pd.read_csv(input_csv, nrows=0)
+    headers = list(df_header.columns)
+    
+    new_headers = []
+    for h in headers:
+        h_clean = h
+        if transformations:
+            for pattern, replacement in transformations.items():
+                new_val = re.sub(pattern, replacement, h_clean)
+                if new_val != h_clean:
+                    h_clean = new_val
                     break
-                fout.write(chunk)
-                pbar.update(len(chunk))
+        new_headers.append(h_clean)
+    
+    # Open output file and write new header.
+    with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
+        writer = csv.writer(fout, delimiter=delimiter)
+        writer.writerow(new_headers)
+    
+    # Count remaining rows (excluding header).
+    total = count_rows(input_csv, chunksize)
+    
+    # Now stream the rest of the CSV (skip the header) using read_csv_in_chunks.
+    first_chunk = True
+    with tqdm(total=total, desc="Renaming headers & copying CSV", unit="row", ncols=100) as pbar:
+        for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False, skiprows=1):
+            # Write the chunk (using to_csv with header=False)
+            mode = 'a' if not first_chunk else 'w'
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                chunk.to_csv(fout, index=False, header=False)
+            first_chunk = False
+            pbar.update(chunk.shape[0])
     return output_csv
 
 def infer_dtypes(file_path, nrows=1000):
