@@ -239,14 +239,13 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     seen = set()
     first_chunk = True
-    total = count_rows_in_chunks(input_csv, chunksize)
+    total = count_rows(input_csv, chunksize)
     with tqdm(total=total, desc="Filtering unique rows", unit="row", ncols=100) as pbar:
-        for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False):
+        for chunk in read_csv_in_chunks(input_csv, chunksize):
             mask = []
             for idx, row in chunk.iterrows():
                 if not unique_cols:
-                    key_str = ','.join(str(v) for v in row.values)
-                    key = hash(key_str)
+                    key = hash(','.join(str(v) for v in row.values))
                 else:
                     key = tuple(row[col] for col in unique_cols)
                 if key in seen:
