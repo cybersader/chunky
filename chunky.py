@@ -427,11 +427,7 @@ def concatenate_csv_folder(input_folder, output_file, chunksize=10000):
     return output_file
 
 # -------------------------
-# 8. Rename CSV Header (Row-Based Progress)
-# -------------------------
-
-# -------------------------
-# 8. Rename CSV Header (Row-Based Streaming)
+# 8. Rename CSV Header (Streaming)
 # -------------------------
 
 def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=",", chunksize=10000):
@@ -478,6 +474,38 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
             with open(output_csv, 'a', newline='', encoding='utf-8') as fout:
                 chunk.to_csv(fout, index=False, header=False)
             pbar.update(chunk.shape[0])
+    return output_csv
+
+def select_columns(input_csv, columns, output_csv, chunksize=10000):
+    """
+    Create a new CSV file containing only the specified columns from the input CSV,
+    processing the file in chunks to keep memory usage low.
+
+    Parameters:
+      input_csv : Path to the input CSV.
+      columns   : List of column names to select.
+      output_csv: Path to the output CSV.
+      chunksize : Number of rows per chunk.
+
+    Returns:
+      The output CSV filename.
+    """
+    # Count total rows to set up the progress bar.
+    total = count_rows(input_csv, chunksize)
+    
+    first_chunk = True
+    with tqdm(total=total, desc="Selecting columns", unit="row", ncols=100) as pbar:
+        for chunk in read_csv_in_chunks(input_csv, chunksize):
+            # Select only the specified columns.
+            selected_chunk = chunk[columns]
+            # Write to output file: header only for the first chunk.
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                selected_chunk.to_csv(fout, index=False, header=header)
+            first_chunk = False
+            pbar.update(chunk.shape[0])
+    
     return output_csv
 
 def select_columns(input_csv, columns, output_csv, chunksize=10000):
