@@ -202,7 +202,7 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     """
     first_chunk = True
     total = count_rows(input_csv, chunksize)
-    with tqdm(total=total, desc="Filtering CSV", unit="row", ncols=100) as pbar:
+    with tqdm(total=total, desc="Filtering CSV", unit="rows", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             mask = filter_func(chunk)
             if not isinstance(mask, pd.Series) or mask.dtype != bool or len(mask) != len(chunk):
@@ -213,7 +213,7 @@ def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
             with open(output_csv, mode, newline='', encoding='utf-8') as fout:
                 filtered.to_csv(fout, index=False, header=header)
             first_chunk = False
-            pbar.update(chunk.shape[0])
+            pbar.update(chunk.shape[0] * chunks)
     return output_csv
 
 # -------------------------
