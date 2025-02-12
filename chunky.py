@@ -239,7 +239,7 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     seen = set()
     first_chunk = True
-    total = count_rows_in_chunks(count_rows_in_chunks, chunksize)
+    total = count_rows_in_chunks(input_csv, chunksize)
     with tqdm(total=total, desc="Filtering unique rows", unit="row", ncols=100) as pbar:
         for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False):
             mask = []
