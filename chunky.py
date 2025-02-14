@@ -508,6 +508,33 @@ def select_columns(input_csv, columns, output_csv, chunksize=10000):
     
     return output_csv
 
+def add_new_columns(input_csv, output_csv, new_columns, chunksize=10000):
+    """
+    Create new columns in a CSV file using functions provided in new_columns dict.
+    
+    Parameters:
+      input_csv   : Path to the input CSV.
+      output_csv  : Path to the output CSV.
+      new_columns : Dict mapping new column names to functions that take a row (pd.Series) and return a value.
+      chunksize   : Number of rows per chunk.
+    
+    Returns:
+      The output CSV filename.
+    """
+    total = count_rows(input_csv, chunksize)
+    first_chunk = True
+    with tqdm(total=total, desc="Adding new columns", unit="row", ncols=100) as pbar:
+        for chunk in read_csv_in_chunks(input_csv, chunksize):
+            for new_col, func in new_columns.items():
+                chunk[new_col] = chunk.apply(func, axis=1)
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                chunk.to_csv(fout, index=False, header=header)
+            first_chunk = False
+            pbar.update(chunk.shape[0])
+    return output_csv
+
 def infer_dtypes(file_path, nrows=1000):
     """
     Infer the data types of the columns in a CSV by reading a small sample.
