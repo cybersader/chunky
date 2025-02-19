@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 chunky.py – A minimal CSV transformation library using streaming/chunked processing.
-
 This package includes functions to:
   • Count rows and stream CSVs in chunks.
   • Build a pivot table from a large CSV (with aggregations such as count, sum, nunique, and concatenation).
@@ -9,7 +8,6 @@ This package includes functions to:
   • Join two CSV files using streaming with a custom progress bar for comparisons.
   • Other utilities: unique_filter, process_csv_remove_parentheses, generate_column_analytics, 
     concatenate_csv_folder, and rename_csv_header.
-
 All functions output a CSV file and use progress bars that update based on row counts.
 """
 
@@ -189,14 +187,12 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
 def filter_csv(input_csv, output_csv, filter_func, chunksize=10000):
     """
     Filter rows in a CSV file using a stateless filter function.
-
     Parameters:
       input_csv : Path to the input CSV.
       output_csv: Path to the output CSV.
       filter_func: A function that takes a DataFrame chunk and returns a Boolean Series
                    (of the same length) indicating which rows to keep.
       chunksize : Number of rows to process per chunk.
-
     Returns:
       The output CSV filename.
     """
@@ -224,16 +220,13 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
     """
     Filter the input CSV so that only unique rows (based on specified columns)
     are written to the output CSV using a streaming approach.
-
     If unique_cols is empty (or False), uniqueness is computed on all columns by hashing
     the comma-joined row values.
-
     Parameters:
       input_csv  : Path to the input CSV.
       unique_cols: List of column names that define uniqueness (if empty, use all columns).
       output_csv : Path to the output CSV.
       chunksize  : Number of rows per chunk.
-
     Returns:
       The output CSV filename.
     """
@@ -269,10 +262,8 @@ def unique_filter(input_csv, unique_cols, output_csv, chunksize=10000):
 def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv=None, suffixes=('_x', '_y')):
     """
     Join two CSV files using a streaming approach with a custom progress bar for comparisons.
-
     Reads the left_file in chunks and, for each left chunk, iterates through chunks of the right_file.
     Total comparisons are estimated as total_rows_left * total_rows_right.
-
     Parameters:
       left_file  : Path to the main (large) CSV file.
       right_file : Path to the CSV file to join.
@@ -282,7 +273,6 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
       chunksize  : Number of rows per chunk.
       output_csv : (Optional) Output CSV filename.
       suffixes   : Suffixes to append to overlapping columns.
-
     Returns:
       The output CSV filename.
     """
@@ -322,14 +312,12 @@ def join_large_csvs(left_file, right_file, left_on, right_on, join_type='left', 
 def process_csv_remove_parentheses(input_csv, columns, chunksize=10000, edit_in_place=True, output_csv=None):
     """
     Remove any text within parentheses from the specified columns.
-
     Parameters:
       input_csv    : Path to the input CSV.
       columns      : List of column names to process.
       chunksize    : Number of rows to process per chunk.
       edit_in_place: If True, overwrite original column; otherwise create a new column.
       output_csv   : (Optional) Output CSV filename.
-
     Returns:
       The output CSV filename.
     """
@@ -394,6 +382,113 @@ def generate_column_analytics(input_csv, output_csv=None, chunksize=10000):
     df_out.to_csv(output_csv, index=False, quoting=csv.QUOTE_ALL, escapechar='"')
     return output_csv
 
+def generate_column_analytics_in_chunks(input_csv, output_csv=None, chunksize=10000,
+                                        max_value_length=5000, long_value_handling='truncate',
+                                        show_unique_values=True, show_unique_counts=True,
+                                        uniq_value_mode='efficient', nonnull_threshold=0.96,
+                                        efficient_mode_multiplier=5):
+    total_rows = count_rows(input_csv)
+
+    aggregated_analytics = {}  # Use a dictionary to store aggregated analytics
+    unique_values_sets = {}  # Initialize the unique_values_sets dictionary
+
+    result = pd.DataFrame()
+
+    with tqdm(total=total_rows, desc='Processing chunks', unit=' rows', ncols=100) as pbar:
+        for chunk in pd.read_csv(input_csv, chunksize=chunksize, low_memory=False):
+            chunk_stats = []
+
+            for column_name in chunk.columns:
+                col_data = chunk[column_name]
+                if column_name not in unique_values_sets:
+                    unique_values_sets[column_name] = set()
+                unique_values_sets[column_name].update(col_data.dropna().unique())
+
+                if pd.api.types.is_numeric_dtype(col_data):
+                    col_stats = {
+                        'column_name': column_name,
+                        'mean': col_data.mean(),
+                        'median': col_data.median(),
+                        'std': col_data.std(),
+                        'min': col_data.min(),
+                        'max': col_data.max(),
+                        '25_percentile': col_data.quantile(0.25),
+                        '75_percentile': col_data.quantile(0.75),
+                        'unique': col_data.nunique(),
+                        'non_null': col_data.count(),
+                        'null': col_data.isnull().sum(),
+                        'percent_non_null': col_data.count() / total_rows,
+                        'percent_unique': col_data.nunique() / total_rows,
+                        'mode': col_data.mode().iloc[0] if not col_data.mode().empty else None
+                    }
+                else:
+                    col_stats = {
+                        'column_name': column_name,
+                        'unique': col_data.nunique(),
+                        'non_null': col_data.count(),
+                        'null': col_data.isnull().sum(),
+                        'mode': col_data.mode().iloc[0] if not col_data.mode().empty else None,
+                        'percent_non_null': col_data.count() / total_rows,
+                        'percent_unique': col_data.nunique() / total_rows
+                    }
+
+                    def stringify_values(value_counts):
+                        str_value_counts = {}
+                        for k, v in value_counts.items():
+                            str_value_counts[str(k)] = v
+                        return str_value_counts
+
+                    if show_unique_values:
+                        value_counts = col_data.value_counts()
+                        str_value_counts = stringify_values(value_counts)
+
+                        if show_unique_counts:
+                            col_stats['unique_values'] = str_value_counts
+                        else:
+                            col_stats['unique_values'] = list(str_value_counts.keys())
+
+                        serialized_unique_values = json.dumps(col_stats['unique_values'], default=str)
+
+                        if max_value_length is not None and len(serialized_unique_values) > max_value_length:
+                            if long_value_handling == 'truncate':
+                                col_stats['unique_values'] = serialized_unique_values[:max_value_length]
+                            elif long_value_handling == 'horizontal':
+                                serialized_unique_values_parts = [serialized_unique_values[i:i + max_value_length] for i
+                                                                  in
+                                                                  range(0, len(serialized_unique_values),
+                                                                        max_value_length)]
+                                col_stats['unique_values'] = {}
+                                for idx, part in enumerate(serialized_unique_values_parts):
+                                    new_key = f"unique_values_part[{idx}]"
+                                    col_stats['unique_values'][new_key] = part
+                            elif long_value_handling == 'explode':
+                                serialized_unique_values_parts = [serialized_unique_values[i:i + max_value_length] for i
+                                                                  in
+                                                                  range(0, len(serialized_unique_values),
+                                                                        max_value_length)]
+                                col_stats['unique_values'] = []
+                                for part in serialized_unique_values_parts:
+                                    col_stats['unique_values'].append(part)
+
+                        if uniq_value_mode == 'efficient':
+                            if col_stats['percent_non_null'] >= nonnull_threshold:
+                                uniq_count_threshold = efficient_mode_multiplier * col_data.nunique()
+                                if len(col_stats['unique_values']) > uniq_count_threshold:
+                                    col_stats['unique_values'] = 'Exceeded count threshold'
+
+                chunk_stats.append(col_stats)
+
+            result = result.append(chunk_stats, ignore_index=True)
+            pbar.update(chunk.shape[0])
+
+    if output_csv is None:
+        input_csv_basename = os.path.basename(input_csv)
+        filename_without_ext = os.path.splitext(input_csv_basename)[0]
+        output_csv = f'col_analysis__{filename_without_ext}.csv'
+
+    result.to_csv(output_csv, index=False, escapechar='"', quoting=csv.QUOTE_ALL)
+    return output_csv
+
 # -------------------------
 # 7. Concatenate CSV Folder
 # -------------------------
@@ -434,14 +529,12 @@ def rename_csv_header(input_csv, output_csv, transformations=None, delimiter=","
     """
     Rename header fields in a CSV file according to provided regex transformations.
     This version uses a row-based streaming approach so that the progress bar is updated by row count.
-
     Parameters:
       input_csv      : Path to the input CSV.
       output_csv     : Path to the output CSV.
       transformations: Dictionary mapping regex patterns to replacement strings or callables.
       delimiter      : Field delimiter (default is comma).
       chunksize      : Number of rows per chunk (for streaming the file body).
-
     Returns:
       The output CSV filename.
     """
@@ -480,13 +573,11 @@ def select_columns(input_csv, columns, output_csv, chunksize=10000):
     """
     Create a new CSV file containing only the specified columns from the input CSV,
     processing the file in chunks to keep memory usage low.
-
     Parameters:
       input_csv : Path to the input CSV.
       columns   : List of column names to select.
       output_csv: Path to the output CSV.
       chunksize : Number of rows per chunk.
-
     Returns:
       The output CSV filename.
     """
@@ -542,3 +633,39 @@ def infer_dtypes(file_path, nrows=1000):
     df_sample = pd.read_csv(file_path, nrows=nrows)
     dtypes = df_sample.dtypes.to_dict()
     return {col: str(dtype) for col, dtype in dtypes.items()}
+
+def trim_csv(input_csv, output_csv, row_count, chunksize=100):
+    """
+    Trim down the input CSV to the specified number of rows using streaming and save it to the output CSV.
+    
+    Parameters:
+      input_csv  : Path to the input CSV.
+      output_csv : Path to the output CSV.
+      row_count  : Number of rows to retain in the trimmed CSV.
+      chunksize  : Number of rows per chunk.
+    
+    Returns:
+      The output CSV filename.
+    """
+    total_rows_written = 0
+    first_chunk = True
+
+    with tqdm(total=row_count, desc="Trimming rows", unit="row", ncols=100) as pbar:
+        for chunk in pd.read_csv(input_csv, chunksize=chunksize):
+            if total_rows_written + len(chunk) > row_count:
+                chunk = chunk.head(row_count - total_rows_written)
+            
+            mode = 'w' if first_chunk else 'a'
+            header = first_chunk
+            with open(output_csv, mode, newline='', encoding='utf-8') as fout:
+                chunk.to_csv(fout, index=False, header=header)
+            
+            total_rows_written += len(chunk)
+            pbar.update(len(chunk))
+            
+            if total_rows_written >= row_count:
+                break
+            
+            first_chunk = False
+            
+    return output_csv
