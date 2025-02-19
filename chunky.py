@@ -721,3 +721,80 @@ def join_large_csvs_2(left_file, right_file, left_on, right_on, join_type='left'
 
     # Return the output CSV file name
     return output_csv
+
+def left_join_large_csvs_small_right(
+    left_file,
+    right_file,
+    left_on,
+    right_on,
+    join_type='left',
+    chunksize=50000,
+    output_csv=None,
+    suffixes=('_x', '_y'),
+    encoding='utf-8-sig'
+):
+    """
+    Join two CSV files by reading the ENTIRE right file into memory (assuming it's small)
+    and streaming the left file in chunks. This is similar to an Excel VLOOKUP or
+    typical merge with a small 'lookup' table.
+
+    Parameters:
+      left_file  : Path to the main (large) CSV file (we read it in chunks).
+      right_file : Path to the smaller CSV file (read in full).
+      left_on    : Column name(s) on the left file to join on.
+      right_on   : Column name(s) on the right file to join on.
+      join_type  : Type of join (e.g., 'left', 'inner'). Default is 'left'.
+      chunksize  : Number of rows per chunk for the left file.
+      output_csv : (Optional) Output CSV filename. If None, a default is generated.
+      suffixes   : Suffixes to append to overlapping columns.
+      encoding   : Encoding used when reading/writing CSV (default 'utf-8-sig').
+
+    Returns:
+      The output CSV filename.
+    """
+
+    import os
+    import pandas as pd
+    from tqdm import tqdm
+
+    # If no output file is provided, create one from the left file's name.
+    if output_csv is None:
+        left_basename = os.path.basename(left_file)
+        left_stem, left_ext = os.path.splitext(left_basename)
+        output_csv = os.path.join(
+            os.path.dirname(left_file),
+            f"joined_smallright__{left_stem}.csv"
+        )
+
+    # Read the entire right CSV into memory (small enough).
+    right_df = pd.read_csv(right_file, encoding=encoding, low_memory=False)
+
+    # Count rows in the left file for the progress bar.
+    total_rows_left = count_rows_in_chunks(left_file, chunksize)
+
+    # Prepare to write the output CSV
+    with open(output_csv, 'w', newline='', encoding=encoding) as f_out:
+        writer = None
+
+        with tqdm(total=total_rows_left, desc="Joining CSV (small right)", unit="row", ncols=100) as pbar:
+            # Read the left file in chunks
+            for left_chunk in read_csv_in_chunks(left_file, chunksize):
+                # Merge with the in-memory right_df
+                df_merged = pd.merge(
+                    left_chunk,
+                    right_df,
+                    how=join_type,
+                    left_on=left_on,
+                    right_on=right_on,
+                    suffixes=suffixes
+                )
+                # If it's the first chunk, write the header. Otherwise, append without header.
+                if writer is None:
+                    df_merged.to_csv(f_out, index=False, header=True)
+                    writer = True
+                else:
+                    df_merged.to_csv(f_out, index=False, header=False)
+                # Update the progress bar by the number of rows in this left chunk.
+                pbar.update(left_chunk.shape[0])
+
+    return output_csv
