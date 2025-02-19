@@ -669,3 +669,55 @@ def trim_csv(input_csv, output_csv, row_count, chunksize=100):
             first_chunk = False
             
     return output_csv
+
+def join_large_csvs_2(left_file, right_file, left_on, right_on, join_type='left', chunksize=50000, output_csv=None, suffixes=('_x', '_y')):
+    suffixes = tuple(suffixes)  # Convert list to tuple
+
+    # Get the total number of rows in the left and right CSV files for progress bars
+    total_rows_left = count_rows_in_chunks(left_file, chunksize)
+    total_rows_right = count_rows_in_chunks(right_file, chunksize)
+
+    # Calculate the total number of comparisons
+    total_comparisons = total_rows_left * total_rows_right
+
+    if output_csv is None:
+        input_csv_basename = os.path.basename(left_file)
+        filename_without_ext = os.path.splitext(input_csv_basename)[0]
+        output_csv = os.path.join(os.path.dirname(left_file), f"joined__{filename_without_ext}.csv")
+
+    # Open the output CSV file
+    with open(output_csv, 'w', encoding='utf-8-sig') as f_output:
+        writer = None
+
+        # Initialize the progress bar for total comparisons
+        with CustomComparisonTqdm(total=total_comparisons, desc='Processing comparisons', unit='comparisons',
+                                  ncols=100) as pbar:
+            # Read the left csv file in chunks
+            for left_chunk in read_csv_in_chunks(left_file, chunksize):
+                # Read the right csv file in chunks
+                for right_chunk in read_csv_in_chunks(right_file, chunksize):
+                    # If both suffixes are empty, identify overlapping columns (excluding the merge column)
+                    # to be dropped from the right dataframe
+                    if suffixes == ('', ''):
+                        overlapping_columns = set(left_chunk.columns) & set(right_chunk.columns)
+                        if right_on in overlapping_columns:  # Only attempt to remove if it exists
+                            overlapping_columns.remove(right_on)  # Ensure the merge column is not dropped
+                        right_chunk = right_chunk.drop(columns=overlapping_columns, errors='ignore')
+
+                    df_chunk = pd.merge(left_chunk, right_chunk, how=join_type, left_on=left_on, right_on=right_on,
+                                        suffixes=suffixes)
+
+                    # Write the chunk to the output CSV file
+                    if writer is None:
+                        # If this is the first chunk, write the header and the data
+                        df_chunk.to_csv(f_output, index=False)
+                        writer = True
+                    else:
+                        # If this is not the first chunk, do not write the header again
+                        df_chunk.to_csv(f_output, header=False, mode='a', index=False)
+
+                    # Update the progress bar based on the right side chunksize
+                    pbar.update(chunksize * len(left_chunk))
+
+    # Return the output CSV file name
+    return output_csv
