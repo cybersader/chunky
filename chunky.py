@@ -62,45 +62,73 @@ class CustomComparisonTqdm(tqdm):
 # 1. Streaming Pivot Table with Advanced Aggregation
 # -------------------------
 
-def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chunksize=10000,
-                    output_csv=None, concat_sep=", "):
+def streaming_pivot(
+    input_csv,
+    index_cols,
+    pivot_cols,
+    value_cols,
+    aggfuncs,
+    chunksize=10000,
+    output_csv=None,
+    concat_sep=", "
+):
     """
     Build a pivot table from a large CSV file using streaming/chunked processing.
     
     Parameters:
       input_csv : Path to the input CSV.
       index_cols: List of column names to use as the pivot table's index.
-      pivot_cols: List of column names to pivot on. (If empty, no extra pivoting occurs.)
-      value_cols: List of column names whose values are to be aggregated.
-      aggfuncs  : Either a single string (applied to all value columns) or a dictionary mapping each value column
-                 to an aggregation function. Supported functions are:
-                   - 'count'
-                   - 'sum'
-                   - 'nunique'
-                   - 'concat'  (to join values into a single string)
+                  (like "Rows" in an Excel pivot table)
+      pivot_cols: List of column names to pivot on. (like "Columns" in Excel)
+                  If empty, no extra pivoting occurs (one column per aggregator).
+      value_cols: List of column names whose values are to be aggregated
+                  (like "Values" fields in Excel pivot).
+      aggfuncs  : Either a single string (applied to all value_cols) or a dictionary
+                  mapping each value_col to the aggregator to use. Supported aggregator strings:
+                    - 'count'     → increments an integer
+                    - 'sum'       → sums float values
+                    - 'nunique'   → collects a set of unique values
+                    - 'concat'    → collects a list of values, joined by `concat_sep`
+                    - 'countcat'  → collects all values in a Counter for frequency-based output
       chunksize : Number of rows to process per chunk.
-      output_csv: (Optional) Path for the output CSV. If None, one is generated.
-      concat_sep: Separator string used when concatenating values for 'concat' aggregation.
-    
+      output_csv: (Optional) Path for the output CSV. If None, uses a default name.
+      concat_sep: Separator string when aggregator == 'concat'.
+
     Returns:
       The output CSV filename.
+
+    Notes:
+      - The resulting columns will be named "<col>_<aggregator>_<pivotvals...>" 
+        (or just "<col>_<aggregator>" if pivot_cols is empty).
+      - This ensures that if you have multiple aggregations on the same column,
+        (e.g. "count" and "countcat"), the resulting columns won't collide.
     """
+    import csv
+    import os
+    import pandas as pd
+    from tqdm import tqdm
+    from collections import Counter
+
+    # Count total rows so we can show progress
     total_rows = count_rows_in_chunks(input_csv, chunksize)
-    
-    # Normalize aggfuncs to a dictionary.
+
+    # If aggfuncs is just a single aggregator, apply it to all value_cols
     if not isinstance(aggfuncs, dict):
         aggfuncs = {col: aggfuncs for col in value_cols}
-    
-    # Initialize aggregation dictionary.
-    # Key: (tuple(index values), tuple(pivot values)) → dict for each value column.
+
+    # Our aggregator structure: 
+    #   agg_dict[(index_vals, pivot_vals)][col] = aggregator storage
     agg_dict = {}
-    
+
     with tqdm(total=total_rows, desc="Pivoting rows", unit="row", ncols=100) as pbar:
         for chunk in read_csv_in_chunks(input_csv, chunksize):
             for _, row in chunk.iterrows():
+                # Build the pivot key
                 key_index = tuple(row[col] for col in index_cols)
                 key_pivot = tuple(row[col] for col in pivot_cols) if pivot_cols else tuple()
                 key = (key_index, key_pivot)
+
+                # Initialize aggregator if new
                 if key not in agg_dict:
                     agg_dict[key] = {}
                     for col in value_cols:
@@ -113,71 +141,102 @@ def streaming_pivot(input_csv, index_cols, pivot_cols, value_cols, aggfuncs, chu
                             agg_dict[key][col] = set()
                         elif func == 'concat':
                             agg_dict[key][col] = []
+                        elif func == 'countcat':
+                            agg_dict[key][col] = Counter()
                         else:
-                            raise ValueError(f"Unsupported aggregation function: {func}")
+                            raise ValueError(f"Unsupported aggregator: {func}")
+
+                # Update aggregator with this row
                 for col in value_cols:
                     func = aggfuncs[col]
-                    value = row[col]
+                    val = row[col]
                     if func == 'count':
                         agg_dict[key][col] += 1
                     elif func == 'sum':
                         try:
-                            agg_dict[key][col] += float(value)
-                        except Exception:
+                            agg_dict[key][col] += float(val)
+                        except:
                             pass
                     elif func == 'nunique':
-                        agg_dict[key][col].add(value)
+                        agg_dict[key][col].add(val)
                     elif func == 'concat':
-                        agg_dict[key][col].append(str(value))
-            pbar.update(chunk.shape[0])
-    
-    unique_index = set()
-    unique_pivot = set()
-    for (idx_key, p_key) in agg_dict.keys():
-        unique_index.add(idx_key)
-        unique_pivot.add(p_key)
+                        agg_dict[key][col].append(str(val))
+                    elif func == 'countcat':
+                        agg_dict[key][col][str(val)] += 1
+            pbar.update(len(chunk))
+
+    # Collate unique index and pivot combinations
+    unique_index = {k[0] for k in agg_dict.keys()}
+    unique_pivot = {k[1] for k in agg_dict.keys()}
     unique_index = list(unique_index)
     unique_pivot = list(unique_pivot)
-    
+
+    # Build final pivot table columns
+    # We embed aggregator name in the column to avoid collisions
+    def aggregator_label(func_name):
+        return str(func_name)
+
+    # So final column name = "<value_col>_<aggregator>_<pivotvals...>"
     header = list(index_cols)
     pivot_col_names = []
     for p in unique_pivot:
         pivot_str = "_".join(map(str, p)) if p else ""
         for col in value_cols:
-            pivot_col_names.append(f"{col}_{pivot_str}")
+            func = aggfuncs[col]
+            label = aggregator_label(func)
+            if pivot_str:
+                pivot_col_names.append(f"{col}_{label}_{pivot_str}")
+            else:
+                pivot_col_names.append(f"{col}_{label}")
     header.extend(pivot_col_names)
-    
+
+    # Build rows
     result_rows = []
     for idx_key in unique_index:
-        row_values = list(idx_key)
+        row_vals = list(idx_key)  # Start with index col values
         for p in unique_pivot:
             key = (idx_key, p)
             if key in agg_dict:
-                values = []
+                # gather aggregator results for each value_col
                 for col in value_cols:
                     func = aggfuncs[col]
-                    agg_val = agg_dict[key][col]
+                    aggregator = agg_dict[key][col]
                     if func == 'nunique':
-                        agg_val = len(agg_val)
+                        row_vals.append(len(aggregator))
                     elif func == 'concat':
-                        agg_val = concat_sep.join(agg_val)
-                    values.append(agg_val)
-                row_values.extend(values)
+                        row_vals.append(concat_sep.join(aggregator))
+                    elif func == 'countcat':
+                        # Sort by descending count
+                        items = aggregator.most_common()
+                        row_vals.append("; ".join(f"{val}({cnt})" for val, cnt in items))
+                    else:
+                        # e.g. 'count' or 'sum'
+                        row_vals.append(aggregator)
             else:
+                # if not present, fill with a default
                 for col in value_cols:
                     func = aggfuncs[col]
-                    row_values.append(0 if func in ['count', 'sum', 'nunique'] else "")
-        result_rows.append(row_values)
-    
+                    if func in ['count', 'sum', 'nunique']:
+                        row_vals.append(0)
+                    else:
+                        # e.g. 'concat', 'countcat'
+                        row_vals.append("")
+        result_rows.append(row_vals)
+
+    # If no output_csv provided, make a default
     if output_csv is None:
-        output_csv = os.path.join(os.path.dirname(input_csv), f"pivot__{os.path.basename(input_csv)}")
-    
+        base = os.path.basename(input_csv)
+        root, _ = os.path.splitext(base)
+        output_csv = os.path.join(os.path.dirname(input_csv), f"pivot__{base}")
+
+    # Write final CSV
+    import csv
     with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
-        writer = csv.writer(fout)
-        writer.writerow(header)
-        for r in result_rows:
-            writer.writerow(r)
-    
+        w = csv.writer(fout)
+        w.writerow(header)
+        for row_data in result_rows:
+            w.writerow(row_data)
+
     return output_csv
 
 # -------------------------
